@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gestión Documental Moderna</title>
+    <!-- TailwindCSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Font Awesome -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Vue 3 CDN -->
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <!-- Dexie.js -->
+    <script src="https://unpkg.com/dexie@3.2.4/dist/dexie.js"></script>
+    <style>
+        /* Estilos personalizados adicionales */
+        .transition-all {
+            transition: all 0.3s ease;
+        }
+        .card-hover:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.02);
+        }
+        .status-badge {
+            @apply px-2 py-1 rounded-full text-xs font-semibold;
+        }
+        .status-present {
+            @apply bg-green-100 text-green-800;
+        }
+        .status-missing {
+            @apply bg-red-100 text-red-800;
+        }
+    </style>
+</head>
+<body class="bg-gradient-to-br from-indigo-50 to-purple-50 min-h-screen font-sans">
+    <div id="app">
+        <!-- Navbar -->
+        <nav class="bg-white shadow-md sticky top-0 z-50">
+            <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+                <div class="flex justify-between items-center h-16">
+                    <div class="flex items-center space-x-3">
+                        <i class="fas fa-folder-open text-indigo-600 text-2xl"></i>
+                        <h1 class="text-xl font-bold text-gray-800">Gestión Documental · Alumnos</h1>
+                    </div>
+                    <div class="flex space-x-2">
+                        <button @click="exportData" class="bg-gray-100 hover:bg-gray-200 text-gray-700 px-3 py-2 rounded-lg text-sm font-medium transition-all">
+                            <i class="fas fa-download mr-1"></i> Exportar
+                        </button>
+                        <button @click="importData" class="bg-gray-100 hover:bg-gray-200 text-gray-700 px-3 py-2 rounded-lg text-sm font-medium transition-all">
+                            <i class="fas fa-upload mr-1"></i> Importar
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </nav>
+
+        <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+            <!-- Tarjetas de estadísticas -->
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+                <div class="bg-white rounded-xl shadow-md p-6 card-hover transition-all">
+                    <div class="flex items-center justify-between">
+                        <div>
+                            <p class="text-gray-500 text-sm">Total Alumnos</p>
+                            <p class="text-3xl font-bold text-indigo-600">{{ stats.totalStudents }}</p>
+                        </div>
+                        <i class="fas fa-users text-4xl text-indigo-200"></i>
+                    </div>
+                </div>
+                <div class="bg-white rounded-xl shadow-md p-6 card-hover transition-all">
+                    <div class="flex items-center justify-between">
+                        <div>
+                            <p class="text-gray-500 text-sm">Documentos Totales</p>
+                            <p class="text-3xl font-bold text-emerald-600">{{ stats.totalDocs }}</p>
+                        </div>
+                        <i class="fas fa-file-alt text-4xl text-emerald-200"></i>
+                    </div>
+                </div>
+                <div class="bg-white rounded-xl shadow-md p-6 card-hover transition-all">
+                    <div class="flex items-center justify-between">
+                        <div>
+                            <p class="text-gray-500 text-sm">Presentados</p>
+                            <p class="text-3xl font-bold text-green-600">{{ stats.presentDocs }}</p>
+                        </div>
+                        <i class="fas fa-check-circle text-4xl text-green-200"></i>
+                    </div>
+                </div>
+                <div class="bg-white rounded-xl shadow-md p-6 card-hover transition-all">
+                    <div class="flex items-center justify-between">
+                        <div>
+                            <p class="text-gray-500 text-sm">Faltantes</p>
+                            <p class="text-3xl font-bold text-red-600">{{ stats.missingDocs }}</p>
+                        </div>
+                        <i class="fas fa-times-circle text-4xl text-red-200"></i>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Barra de acciones -->
+            <div class="flex flex-wrap justify-between items-center gap-4 mb-6">
+                <button @click="showAddModal = true" class="bg-indigo-600 hover:bg-indigo-700 text-white px-5 py-2 rounded-lg shadow-md transition-all flex items-center gap-2">
+                    <i class="fas fa-plus"></i> Nuevo Alumno
+                </button>
+                <button @click="loadData" class="bg-white hover:bg-gray-50 text-gray-700 px-5 py-2 rounded-lg shadow-md transition-all flex items-center gap-2">
+                    <i class="fas fa-sync-alt"></i> Actualizar
+                </button>
+            </div>
+
+            <!-- Tabla de alumnos -->
+            <div class="bg-white rounded-xl shadow-lg overflow-hidden">
+                <div class="overflow-x-auto">
+                    <table class="min-w-full divide-y divide-gray-200">
+                        <thead class="bg-gradient-to-r from-indigo-600 to-purple-600">
+                            <tr>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-white uppercase tracking-wider">ID</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-white uppercase tracking-wider">Alumno</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-white uppercase tracking-wider">Documentos</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-white uppercase tracking-wider">Estado</th>
+                                <th class="px-6 py-3 text-right text-xs font-medium text-white uppercase tracking-wider">Acciones</th>
+                            </tr>
+                        </thead>
+                        <tbody class="bg-white divide-y divide-gray-200">
+                            <tr v-for="student in students" :key="student.id" class="hover:bg-gray-50 transition-colors">
+                                <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{{ student.id }}</td>
+                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900 font-medium">{{ student.name }}</td>
+                                <td class="px-6 py-4">
+                                    <div class="space-y-2">
+                                        <div v-for="doc in student.documents" :key="doc.id" class="flex items-center justify-between gap-2">
+                                            <div class="flex flex-col">
+                                                <span class="text-sm font-medium text-gray-800">{{ doc.name }}</span>
+                                                <span class="text-xs text-gray-500">Firmas: {{ doc.requiredSignatures.join(', ') }}</span>
+                                            </div>
+                                            <div class="flex items-center gap-2">
+                                                <span :class="doc.present ? 'status-present' : 'status-missing'" class="status-badge text-xs">
+                                                    {{ doc.present ? 'Presente' : 'Faltante' }}
+                                                </span>
+                                                <button @click="toggleDocument(student.id, doc.id)" class="text-indigo-600 hover:text-indigo-800 text-sm">
+                                                    <i :class="doc.present ? 'fas fa-times-circle' : 'fas fa-check-circle'"></i>
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </td>
+                                <td class="px-6 py-4 whitespace-nowrap">
+                                    <div class="flex flex-col gap-1">
+                                        <div class="flex items-center gap-2">
+                                            <i class="fas fa-check-circle text-green-500" v-if="getCompletionPercentage(student) === 100"></i>
+                                            <i class="fas fa-chart-line text-blue-500" v-else></i>
+                                            <span class="text-sm font-medium">{{ getCompletionPercentage(student) }}% completado</span>
+                                        </div>
+                                        <div class="w-full bg-gray-200 rounded-full h-2">
+                                            <div class="bg-indigo-600 h-2 rounded-full transition-all duration-300" :style="{ width: getCompletionPercentage(student) + '%' }"></div>
+                                        </div>
+                                    </div>
+                                </td>
+                                <td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
+                                    <button @click="editStudent(student)" class="text-indigo-600 hover:text-indigo-900 mr-3">
+                                        <i class="fas fa-edit"></i>
+                                    </button>
+                                    <button @click="deleteStudent(student.id)" class="text-red-600 hover:text-red-900">
+                                        <i class="fas fa-trash-alt"></i>
+                                    </button>
+                                </td>
+                            </tr>
+                            <tr v-if="students.length === 0">
+                                <td colspan="5" class="px-6 py-12 text-center text-gray-500">
+                                    <i class="fas fa-inbox text-4xl mb-2 block"></i>
+                                    No hay alumnos registrados. ¡Haz clic en "Nuevo Alumno" para comenzar!
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </main>
+
+        <!-- Modal para añadir/editar alumno -->
+        <div v-if="showAddModal" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4" @click.self="closeModal">
+            <div class="bg-white rounded-2xl shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+                <div class="p-6 border-b border-gray-200">
+                    <h3 class="text-xl font-bold text-gray-800">{{ editingStudent ? 'Editar Alumno' : 'Nuevo Alumno' }}</h3>
+                </div>
+                <div class="p-6 space-y-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Nombre completo</label>
+                        <input type="text" v-model="form.name" class="w-full border border-gray-300 rounded-lg px-4 py-2 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-2">Documentos predefinidos</label>
+                        <div class="space-y-3">
+                            <div v-for="(doc, idx) in predefinedDocs" :key="idx" class="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                                <div>
+                                    <p class="font-medium">{{ doc.name }}</p>
+                                    <p class="text-xs text-gray-500">Firmas requeridas: {{ doc.requiredSignatures.join(', ') }}</p>
+                                </div>
+                                <div class="flex items-center gap-2">
+                                    <span class="text-sm text-gray-600">¿Presente?</span>
+                                    <input type="checkbox" v-model="form.documents[idx].present" class="w-4 h-4 text-indigo-600 rounded focus:ring-indigo-500">
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="p-6 border-t border-gray-200 flex justify-end gap-3">
+                    <button @click="closeModal" class="px-4 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50 transition-all">Cancelar</button>
+                    <button @click="saveStudent" class="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-all">Guardar</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Definir categorías y documentos predefinidos (puedes modificarlos)
+        const PREDEFINED_DOCUMENTS = [
+            { id: 'id_doc', name: 'Identificación oficial', requiredSignatures: ['Alumno', 'Coordinador'] },
+            { id: 'certificate', name: 'Certificado de estudios', requiredSignatures: ['Alumno', 'Secretaría'] },
+            { id: 'contract', name: 'Contrato de servicios', requiredSignatures: ['Alumno', 'Tutor', 'Coordinador'] },
+            { id: 'medical', name: 'Seguro médico', requiredSignatures: ['Alumno'] }
+        ];
+
+        // Inicializar IndexedDB con Dexie
+        const db = new Dexie('DocumentManagementDB');
+        db.version(1).stores({
+            students: '++id, name'  // id autoincrementable, name indexado
+        });
+
+        const { createApp, ref, reactive, computed, onMounted } = Vue;
+
+        createApp({
+            setup() {
+                const students = ref([]);
+                const showAddModal = ref(false);
+                const editingStudent = ref(null);
+                const form = reactive({
+                    name: '',
+                    documents: []
+                });
+
+                // Estadísticas computadas
+                const stats = computed(() => {
+                    let totalDocs = 0, presentDocs = 0;
+                    students.value.forEach(s => {
+                        totalDocs += s.documents.length;
+                        presentDocs += s.documents.filter(d => d.present).length;
+                    });
+                    return {
+                        totalStudents: students.value.length,
+                        totalDocs,
+                        presentDocs,
+                        missingDocs: totalDocs - presentDocs
+                    };
+                });
+
+                // Cargar datos desde IndexedDB
+                const loadData = async () => {
+                    try {
+                        const allStudents = await db.students.toArray();
+                        // Asegurar que cada alumno tenga la estructura de documentos completa
+                        students.value = allStudents.map(s => ({
+                            ...s,
+                            documents: s.documents || PREDEFINED_DOCUMENTS.map(doc => ({
+                                id: doc.id,
+                                name: doc.name,
+                                requiredSignatures: doc.requiredSignatures,
+                                present: false
+                            }))
+                        }));
+                    } catch (error) {
+                        console.error('Error cargando datos:', error);
+                        alert('Error al cargar los datos');
+                    }
+                };
+
+                // Guardar alumno (nuevo o edición)
+                const saveStudent = async () => {
+                    if (!form.name.trim()) {
+                        alert('El nombre del alumno es obligatorio');
+                        return;
+                    }
+
+                    const studentData = {
+                        name: form.name.trim(),
+                        documents: form.documents
+                    };
+
+                    try {
+                        if (editingStudent.value) {
+                            // Actualizar existente
+                            await db.students.update(editingStudent.value.id, studentData);
+                        } else {
+                            // Crear nuevo
+                            await db.students.add(studentData);
+                        }
+                        await loadData();
+                        closeModal();
+                    } catch (error) {
+                        console.error('Error guardando:', error);
+                        alert('Error al guardar el alumno');
+                    }
+                };
+
+                // Alternar estado presente/faltante de un documento
+                const toggleDocument = async (studentId, docId) => {
+                    const student = students.value.find(s => s.id === studentId);
+                    if (!student) return;
+
+                    const doc = student.documents.find(d => d.id === docId);
+                    if (doc) {
+                        doc.present = !doc.present;
+                        try {
+                            await db.students.update(studentId, { documents: student.documents });
+                            await loadData(); // Recargar para asegurar consistencia
+                        } catch (error) {
+                            console.error('Error actualizando documento:', error);
+                        }
+                    }
+                };
+
+                // Editar alumno (abre modal con datos)
+                const editStudent = (student) => {
+                    editingStudent.value = student;
+                    form.name = student.name;
+                    form.documents = JSON.parse(JSON.stringify(student.documents)); // clonar
+                    showAddModal.value = true;
+                };
+
+                // Eliminar alumno
+                const deleteStudent = async (studentId) => {
+                    if (confirm('¿Estás seguro de eliminar este alumno y todos sus documentos?')) {
+                        try {
+                            await db.students.delete(studentId);
+                            await loadData();
+                        } catch (error) {
+                            console.error('Error eliminando:', error);
+                            alert('Error al eliminar');
+                        }
+                    }
+                };
+
+                // Cerrar modal y limpiar formulario
+                const closeModal = () => {
+                    showAddModal.value = false;
+                    editingStudent.value = null;
+                    form.name = '';
+                    form.documents = PREDEFINED_DOCUMENTS.map(doc => ({
+                        id: doc.id,
+                        name: doc.name,
+                        requiredSignatures: doc.requiredSignatures,
+                        present: false
+                    }));
+                };
+
+                // Calcular porcentaje de completitud
+                const getCompletionPercentage = (student) => {
+                    if (!student.documents.length) return 0;
+                    const presentCount = student.documents.filter(d => d.present).length;
+                    return Math.round((presentCount / student.documents.length) * 100);
+                };
+
+                // Exportar datos a JSON
+                const exportData = async () => {
+                    const allData = await db.students.toArray();
+                    const dataStr = JSON.stringify(allData, null, 2);
+                    const blob = new Blob([dataStr], { type: 'application/json' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `documentacion_alumnos_${new Date().toISOString().slice(0,19)}.json`;
+                    a.click();
+                    URL.revokeObjectURL(url);
+                };
+
+                // Importar datos desde JSON
+                const importData = () => {
+                    const input = document.createElement('input');
+                    input.type = 'file';
+                    input.accept = 'application/json';
+                    input.onchange = async (e) => {
+                        const file = e.target.files[0];
+                        if (!file) return;
+                        const reader = new FileReader();
+                        reader.onload = async (ev) => {
+                            try {
+                                const importedData = JSON.parse(ev.target.result);
+                                // Validación simple
+                                if (!Array.isArray(importedData)) throw new Error('Formato inválido');
+                                // Limpiar base de datos actual e insertar los nuevos datos
+                                await db.students.clear();
+                                await db.students.bulkAdd(importedData);
+                                await loadData();
+                                alert('Importación exitosa');
+                            } catch (error) {
+                                console.error(error);
+                                alert('Error al importar: archivo no válido');
+                            }
+                        };
+                        reader.readAsText(file);
+                    };
+                    input.click();
+                };
+
+                // Inicializar
+                onMounted(() => {
+                    loadData();
+                    // Preinicializar formulario con documentos predefinidos
+                    closeModal(); // esto llena form.documents con los predefinidos
+                });
+
+                return {
+                    students,
+                    showAddModal,
+                    editingStudent,
+                    form,
+                    stats,
+                    loadData,
+                    saveStudent,
+                    toggleDocument,
+                    editStudent,
+                    deleteStudent,
+                    closeModal,
+                    getCompletionPercentage,
+                    exportData,
+                    importData,
+                    predefinedDocs: PREDEFINED_DOCUMENTS
+                };
+            }
+        }).mount('#app');
+    </script>
+</body>
+</html>
