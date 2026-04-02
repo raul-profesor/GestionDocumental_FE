@@ -2,13 +2,15 @@ import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 
 const API_URL = '/api';
+const APP_VERSION = "2.2"; // Eliminada opción de firmar
+console.log(`%cIniciando GESTIÓN DOCUMENTAL v${APP_VERSION}`, "background: #4f46e5; color: white; padding: 4px 8px; border-radius: 4px; font-weight: bold;");
 
 function App() {
   const [students, setStudents] = useState([]);
   const [predefinedDocs, setPredefinedDocs] = useState([]);
   const [showModal, setShowModal] = useState(false);
   const [editing, setEditing] = useState(null);
-  const [form, setForm] = useState({ name: '', documents: [] });
+  const [form, setForm] = useState({ name: '', company: '', startDate: '', endDate: '', documents: [] });
   const [expandedStudent, setExpandedStudent] = useState(null);
 
   useEffect(() => {
@@ -19,7 +21,12 @@ function App() {
   const fetchStudents = async () => {
     try {
       const res = await axios.get(`${API_URL}/students`);
-      setStudents(res.data);
+      // Ordenar alumnos por ID y sus documentos por ID para evitar saltos en la UI
+      const sorted = (res.data || []).map(s => ({
+        ...s,
+        documents: (s.documents || []).sort((a, b) => (a.id || 0) - (b.id || 0))
+      })).sort((a, b) => a.id - b.id);
+      setStudents(sorted);
     } catch (error) {
       console.error('Error fetching students:', error);
     }
@@ -41,6 +48,9 @@ function App() {
       if (editing) {
         await axios.put(`${API_URL}/students/${editing.id}`, {
           name: form.name,
+          company: form.company,
+          startDate: form.startDate,
+          endDate: form.endDate,
           documents: form.documents.map(doc => ({
             id: doc.id,
             category: doc.category,
@@ -51,6 +61,9 @@ function App() {
       } else {
         await axios.post(`${API_URL}/students`, {
           name: form.name,
+          company: form.company,
+          startDate: form.startDate,
+          endDate: form.endDate,
           documents: form.documents.map(doc => ({
             category: doc.category,
             signatures: doc.signatures,
@@ -103,17 +116,43 @@ function App() {
   };
 
   const handleSignatureToggle = async (docId, signatureIndex) => {
-    const student = students.find(s => s.documents.some(d => d.id === docId));
-    if (!student) return;
-    const doc = student.documents.find(d => d.id === docId);
-    const newSignatures = [...doc.signatures];
-    newSignatures[signatureIndex].present = !newSignatures[signatureIndex].present;
+    // Optimistic update for zero-latency UI
+    const updatedStudents = students.map(s => ({
+      ...s,
+      documents: s.documents.map(d => {
+        if (d.id === docId) {
+          const newSigs = [...d.signatures];
+          newSigs[signatureIndex].present = !newSigs[signatureIndex].present;
+          return { ...d, signatures: newSigs };
+        }
+        return d;
+      })
+    }));
+    setStudents(updatedStudents);
+
     try {
-      await axios.put(`${API_URL}/documents/${docId}/signatures`, { signatures: newSignatures });
-      fetchStudents();
+      const doc = updatedStudents.flatMap(s => s.documents).find(d => d.id === docId);
+      await axios.put(`${API_URL}/documents/${docId}/signatures`, { signatures: doc.signatures });
+      // No llamamos a fetchStudents aquí para evitar parpadeos si la red es lenta, 
+      // el estado ya está actualizado de forma optimista.
     } catch (error) {
       console.error('Error updating signatures:', error);
+      fetchStudents(); 
       alert('Error al actualizar firmas');
+    }
+  };
+
+  const handleImport = async (file) => {
+    if (!file) return;
+    const formData = new FormData();
+    formData.append('file', file);
+    try {
+      await axios.post(`${API_URL}/students/import`, formData);
+      alert('Importación completada con éxito');
+      fetchStudents();
+    } catch (error) {
+      console.error('Error importing students:', error);
+      alert('Error al importar el archivo Excel/CSV');
     }
   };
 
@@ -137,10 +176,19 @@ function App() {
     return 'bg-green-600';
   };
 
+  const getDocCompletionPercentage = (doc) => {
+    if (!doc.signatures || doc.signatures.length === 0) return 100;
+    const present = doc.signatures.filter(s => s.present).length;
+    return Math.round((present / doc.signatures.length) * 100);
+  };
+
   const openNewStudentModal = () => {
     setEditing(null);
     setForm({
       name: '',
+      company: '',
+      startDate: '',
+      endDate: '',
       documents: predefinedDocs.map(doc => ({
         category: doc.name,
         signatures: doc.requiredSignatures.map(s => ({ name: s, present: false })),
@@ -155,6 +203,9 @@ function App() {
     setEditing(student);
     setForm({
       name: student.name,
+      company: student.company || '',
+      startDate: student.startDate ? student.startDate.split('T')[0] : '',
+      endDate: student.endDate ? student.endDate.split('T')[0] : '',
       documents: student.documents.map(doc => ({
         id: doc.id,
         category: doc.category,
@@ -170,13 +221,22 @@ function App() {
     <div className="container mx-auto p-4">
       <h1 className="text-3xl font-bold mb-6 text-indigo-700">📄 Gestión Documental</h1>
 
-      <div className="mb-6">
+      <div className="flex gap-3 mb-6">
         <button
           onClick={openNewStudentModal}
-          className="bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700 transition flex items-center gap-2"
+          className="bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700 transition flex items-center gap-2 shadow-sm"
         >
-          <i className="fas fa-plus"></i> Nuevo Alumno
+          <i className="fas fa-user-plus"></i> Nuevo Alumno
         </button>
+        <label className="bg-white text-indigo-600 border border-indigo-200 px-4 py-2 rounded-lg hover:bg-indigo-50 transition cursor-pointer flex items-center gap-2 shadow-sm">
+          <i className="fas fa-file-import"></i> Importar Excel/CSV
+          <input
+            type="file"
+            accept=".xlsx,.xls,.csv"
+            onChange={(e) => handleImport(e.target.files[0])}
+            className="hidden"
+          />
+        </label>
       </div>
 
       <div className="space-y-3">
@@ -193,11 +253,24 @@ function App() {
                   <i className={`fas ${expandedStudent === student.id ? 'fa-chevron-down' : 'fa-chevron-right'} text-gray-500`}></i>
                   <div>
                     <h3 className="text-lg font-semibold text-gray-800">{student.name}</h3>
-                    <div className="flex items-center gap-2 mt-1">
-                      <div className="w-32 bg-gray-200 rounded-full h-2">
-                        <div className={`${progressColor} h-2 rounded-full transition-all duration-300`} style={{ width: `${percentage}%` }}></div>
+                    <div className="flex flex-wrap gap-x-4 gap-y-1 mt-1">
+                      <div className="flex items-center gap-2">
+                        <div className="w-24 bg-gray-200 rounded-full h-2">
+                          <div className={`${progressColor} h-2 rounded-full transition-all duration-300`} style={{ width: `${percentage}%` }}></div>
+                        </div>
+                        <span className="text-xs font-medium text-gray-600">{percentage}% total</span>
                       </div>
-                      <span className="text-sm text-gray-600">{percentage}% completado</span>
+                      {student.company && (
+                        <span className="text-xs text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded-full border border-indigo-100">
+                          <i className="fas fa-building mr-1"></i>{student.company}
+                        </span>
+                      )}
+                      {student.startDate && (
+                        <span className="text-xs text-gray-500">
+                          <i className="fas fa-calendar-alt mr-1"></i>
+                          {new Date(student.startDate).toLocaleDateString()} - {student.endDate ? new Date(student.endDate).toLocaleDateString() : '...'}
+                        </span>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -222,7 +295,14 @@ function App() {
                   {student.documents.map(doc => (
                     <div key={doc.id} className={`bg-white rounded-lg p-4 mb-3 shadow-sm border ${doc.applies ? 'border-gray-200' : 'border-gray-300 bg-gray-50'}`}>
                       <div className="flex justify-between items-start mb-2">
-                        <h4 className="font-semibold text-gray-800">{doc.category}</h4>
+                        <div>
+                          <h4 className="font-semibold text-gray-800">{doc.category}</h4>
+                          {doc.applies && (
+                            <span className={`text-[10px] font-bold uppercase px-1.5 py-0.5 rounded ${getDocCompletionPercentage(doc) === 100 ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-600'}`}>
+                              {getDocCompletionPercentage(doc)}% Firmado
+                            </span>
+                          )}
+                        </div>
                         {doc.optional && (
                           <label className="flex items-center gap-1 text-sm text-gray-600">
                             <input
@@ -293,14 +373,6 @@ function App() {
                                   >
                                     <i className="fas fa-trash-alt"></i>
                                   </button>
-                                  <a
-                                    href={doc.filePath}
-                                    download
-                                    className="text-purple-600 hover:text-purple-800 text-sm p-1 flex items-center gap-1"
-                                    title="Descargar para firmar"
-                                  >
-                                    <i className="fas fa-download"></i> Firmar con AutoFirma
-                                  </a>
                                 </>
                               ) : (
                                 <span className="text-gray-400 text-sm">No subido</span>
@@ -340,12 +412,44 @@ function App() {
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-xl shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto p-6">
             <h2 className="text-xl font-bold mb-4">{editing ? 'Editar Alumno' : 'Nuevo Alumno'}</h2>
-            <input
-              value={form.name}
-              onChange={e => setForm({ ...form, name: e.target.value })}
-              placeholder="Nombre completo"
-              className="border p-2 w-full rounded mb-4"
-            />
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+              <div className="md:col-span-2">
+                <label className="block text-xs font-semibold text-gray-500 uppercase mb-1">Nombre Completo</label>
+                <input
+                  value={form.name}
+                  onChange={e => setForm({ ...form, name: e.target.value })}
+                  placeholder="Ej: Juan Pérez"
+                  className="border p-2 w-full rounded focus:ring-2 focus:ring-indigo-500 outline-none"
+                />
+              </div>
+              <div className="md:col-span-2">
+                <label className="block text-xs font-semibold text-gray-500 uppercase mb-1">Empresa</label>
+                <input
+                  value={form.company}
+                  onChange={e => setForm({ ...form, company: e.target.value })}
+                  placeholder="Ej: Google, INDRA..."
+                  className="border p-2 w-full rounded focus:ring-2 focus:ring-indigo-500 outline-none"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-gray-500 uppercase mb-1">Fecha Inicio</label>
+                <input
+                  type="date"
+                  value={form.startDate}
+                  onChange={e => setForm({ ...form, startDate: e.target.value })}
+                  className="border p-2 w-full rounded focus:ring-2 focus:ring-indigo-500 outline-none"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-gray-500 uppercase mb-1">Fecha Fin</label>
+                <input
+                  type="date"
+                  value={form.endDate}
+                  onChange={e => setForm({ ...form, endDate: e.target.value })}
+                  className="border p-2 w-full rounded focus:ring-2 focus:ring-indigo-500 outline-none"
+                />
+              </div>
+            </div>
             <div className="space-y-3 max-h-96 overflow-y-auto">
               {form.documents.map((doc, i) => (
                 <div key={i} className="border rounded p-3">

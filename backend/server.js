@@ -3,11 +3,14 @@ const cors = require('cors');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const XLSX = require('xlsx');
 const { PrismaClient } = require('@prisma/client');
 
 const prisma = new PrismaClient();
 const app = express();
 const PORT = process.env.PORT || 3001;
+const SERVER_VERSION = "2.1";
+console.log(`Iniciando Backend Documental - Versión ${SERVER_VERSION}`);
 
 // Middleware
 app.use(cors());
@@ -26,8 +29,8 @@ const storage = multer.diskStorage({
     cb(null, `${uniqueSuffix}-${file.originalname}`);
   }
 });
-const upload = multer({ 
-  storage, 
+const upload = multer({
+  storage,
   fileFilter: (req, file, cb) => {
     if (file.mimetype === 'application/pdf') cb(null, true);
     else cb(new Error('Solo se permiten PDFs'));
@@ -38,7 +41,12 @@ const upload = multer({
 app.get('/api/students', async (req, res) => {
   try {
     const students = await prisma.student.findMany({
-      include: { documents: true }
+      include: { 
+        documents: {
+          orderBy: { id: 'asc' }
+        } 
+      },
+      orderBy: { id: 'asc' }
     });
     res.json(students);
   } catch (error) {
@@ -49,15 +57,18 @@ app.get('/api/students', async (req, res) => {
 
 app.post('/api/students', async (req, res) => {
   try {
-    const { name, documents } = req.body;
+    const { name, company, startDate, endDate, documents } = req.body;
     const student = await prisma.student.create({
       data: {
         name,
+        company,
+        startDate: startDate ? new Date(startDate) : null,
+        endDate: endDate ? new Date(endDate) : null,
         documents: {
           create: documents.map(doc => ({
             category: doc.category,
             signatures: doc.signatures || [],
-            applies: doc.applies !== undefined ? doc.applies : true,   // nuevo campo
+            applies: doc.applies !== undefined ? doc.applies : true,
             optional: doc.optional || false
           }))
         }
@@ -74,26 +85,69 @@ app.post('/api/students', async (req, res) => {
 app.put('/api/students/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, documents } = req.body;
-    // Actualizar nombre
-    await prisma.student.update({
-      where: { id: Number(id) },
-      data: { name }
-    });
-    // Actualizar cada documento
-    for (const doc of documents) {
-      await prisma.document.update({
-        where: { id: doc.id },
-        data: {
-          signatures: doc.signatures,
-          category: doc.category,
-          applies: doc.applies
-        }
-      });
-    }
-    const updated = await prisma.student.findUnique({
+    const { name, company, startDate, endDate, documents } = req.body;
+
+    const oldStudent = await prisma.student.findUnique({
       where: { id: Number(id) },
       include: { documents: true }
+    });
+
+    // Renombrar carpeta si el nombre cambió
+    if (oldStudent && oldStudent.name !== name) {
+      const oldPath = path.join(__dirname, 'uploads', oldStudent.name.replace(/[/\\?%*:|"<>]/g, '-'));
+      const newPath = path.join(__dirname, 'uploads', name.replace(/[/\\?%*:|"<>]/g, '-'));
+
+      if (fs.existsSync(oldPath)) {
+        fs.renameSync(oldPath, newPath);
+        
+        // Actualizar todos los filePaths en la DB
+        for (const doc of oldStudent.documents) {
+          if (doc.filePath) {
+            const newFilePath = doc.filePath.replace(
+              `/uploads/${oldStudent.name.replace(/[/\\?%*:|"<>]/g, '-')}`,
+              `/uploads/${name.replace(/[/\\?%*:|"<>]/g, '-')}`
+            );
+            await prisma.document.update({
+              where: { id: doc.id },
+              data: { filePath: newFilePath }
+            });
+          }
+        }
+      }
+    }
+
+    // Actualizar datos del alumno
+    await prisma.student.update({
+      where: { id: Number(id) },
+      data: { 
+        name,
+        company,
+        startDate: startDate ? new Date(startDate) : null,
+        endDate: endDate ? new Date(endDate) : null
+      }
+    });
+
+    // Actualizar cada documento
+    if (documents) {
+      for (const doc of documents) {
+        await prisma.document.update({
+          where: { id: doc.id },
+          data: {
+            signatures: doc.signatures,
+            category: doc.category,
+            applies: doc.applies
+          }
+        });
+      }
+    }
+
+    const updated = await prisma.student.findUnique({
+      where: { id: Number(id) },
+      include: { 
+        documents: {
+          orderBy: { id: 'asc' }
+        } 
+      }
     });
     res.json(updated);
   } catch (error) {
@@ -129,23 +183,64 @@ app.delete('/api/students/:id', async (req, res) => {
 app.post('/api/documents/:docId/upload', upload.single('pdf'), async (req, res) => {
   try {
     const { docId } = req.params;
-    if (!req.file) return res.status(400).json({ error: 'No se subió ningún archivo' });
-    const filePath = `/uploads/${req.file.filename}`;
+    if (!req.file) {
+      console.error("Subida fallida: No se recibió archivo");
+      return res.status(400).json({ error: 'No se subió ningún archivo' });
+    }
+
+    const doc = await prisma.document.findUnique({
+      where: { id: Number(docId) },
+      include: { student: true }
+    });
+
+    if (!doc) {
+      console.error(`Documento no encontrado: ${docId}`);
+      return res.status(404).json({ error: 'Documento no encontrado' });
+    }
+
+    const studentFolderName = doc.student.name.replace(/[/\\?%*:|"<>]/g, '-');
+    const targetDir = path.join(__dirname, 'uploads', studentFolderName);
     
-    const existingDoc = await prisma.document.findUnique({ where: { id: Number(docId) } });
-    if (existingDoc && existingDoc.filePath) {
-      const oldFilePath = path.join(__dirname, existingDoc.filePath);
+    // Crear directorio si no existe
+    try {
+      if (!fs.existsSync(targetDir)) {
+        fs.mkdirSync(targetDir, { recursive: true });
+      }
+    } catch (err) {
+      console.error(`Error al crear directorio ${targetDir}:`, err.message);
+      return res.status(500).json({ error: 'Error de permisos al crear carpeta del alumno' });
+    }
+
+    const newFileName = `${Date.now()}-${req.file.originalname}`;
+    const newPath = path.join(targetDir, newFileName);
+
+    // Mover archivo de forma robusta
+    try {
+      fs.renameSync(req.file.path, newPath);
+    } catch (err) {
+      console.warn("renameSync falló, intentando copy+unlink:", err.message);
+      fs.copyFileSync(req.file.path, newPath);
+      fs.unlinkSync(req.file.path);
+    }
+
+    const filePath = `/uploads/${studentFolderName}/${newFileName}`;
+
+    // Eliminar archivo antiguo si existe
+    if (doc.filePath) {
+      const oldFilePath = path.join(__dirname, doc.filePath);
       if (fs.existsSync(oldFilePath)) fs.unlinkSync(oldFilePath);
     }
-    
+
     await prisma.document.update({
       where: { id: Number(docId) },
       data: { filePath }
     });
+    
+    console.log(`Subida exitosa: ${filePath}`);
     res.json({ filePath });
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Error al subir archivo' });
+    console.error("Error crítico en subida:", error);
+    res.status(500).json({ error: 'Error interno al procesar la subida' });
   }
 });
 
@@ -157,6 +252,7 @@ app.put('/api/documents/:docId/signatures', async (req, res) => {
       where: { id: Number(docId) },
       data: { signatures }
     });
+    console.log(`Firma actualizada en documento: ${docId} (Versión ${SERVER_VERSION})`);
     res.json(doc);
   } catch (error) {
     console.error(error);
@@ -185,21 +281,98 @@ app.delete('/api/documents/:docId/pdf', async (req, res) => {
 });
 
 // ---------- Predefinidos (con soporte para optativos) ----------
-app.get('/api/predefined-documents', (req, res) => {
-  const docs = [
-    { id: 'id_doc', name: 'Identificación oficial', requiredSignatures: ['Alumno', 'Coordinador'], optional: false },
-    { id: 'certificate', name: 'Certificado de estudios', requiredSignatures: ['Alumno', 'Secretaría'], optional: false },
-    { id: 'contract', name: 'Contrato de servicios', requiredSignatures: ['Alumno', 'Tutor', 'Coordinador'], optional: true },
-    { id: 'medical', name: 'Seguro médico', requiredSignatures: ['Alumno'], optional: true }
+function getPredefinedDocuments() {
+  return [
+    { name: 'Anexo I', requiredSignatures: ['Dirección', 'Responsable/Representante de la empresa'], optional: true },
+    { name: 'Anexo II', requiredSignatures: ['Dirección', 'Tutor centro', 'Responsable/Representante de la empresa'], optional: false },
+    { name: 'Anexo III', requiredSignatures: ['Alumno', 'Tutor empresa', 'Tutor centro'], optional: false },
+    { name: 'Autorización periodo extraordinario', requiredSignatures: ['Alumno', 'Tutor centro', 'Dirección'], optional: true }
   ];
-  res.json(docs);
+}
+
+app.get('/api/predefined-documents', (req, res) => {
+  res.json(getPredefinedDocuments());
+});
+
+// ---------- Importar desde Excel/CSV ----------
+app.post('/api/students/import', upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'No se subió ningún archivo' });
+
+    const workbook = XLSX.readFile(req.file.path);
+    const sheetName = workbook.SheetNames[0];
+    const worksheet = workbook.Sheets[sheetName];
+    const data = XLSX.utils.sheet_to_json(worksheet);
+
+    const parseDate = (dateStr) => {
+      if (!dateStr) return null;
+      // Si ya es un objeto Date (XLSX puede parsear algunas fechas automáticamente)
+      if (dateStr instanceof Date) return dateStr;
+      
+      // Intentar parsear DD/MM/AAAA
+      const parts = String(dateStr).split('/');
+      if (parts.length === 3) {
+        const day = parseInt(parts[0], 10);
+        const month = parseInt(parts[1], 10) - 1;
+        const year = parseInt(parts[2], 10);
+        const date = new Date(year, month, day);
+        return isNaN(date.getTime()) ? null : date;
+      }
+      
+      // Fallback a constructor estándar
+      const d = new Date(dateStr);
+      return isNaN(d.getTime()) ? null : d;
+    };
+
+    const predefined = getPredefinedDocuments();
+
+    for (const row of data) {
+      const name = row['Nombre'] || row['nombre'];
+      if (!name) continue;
+
+      const company = row['Empresa'] || row['empresa'] || '';
+      const startDate = parseDate(row['Fecha Inicio'] || row['fecha_inicio'] || row['inicio']);
+      const endDate = parseDate(row['Fecha Fin'] || row['fecha_fin'] || row['fin']);
+
+      await prisma.student.create({
+        data: {
+          name,
+          company,
+          startDate,
+          endDate,
+          documents: {
+            create: predefined.map(p => ({
+              category: p.name,
+              signatures: p.requiredSignatures.map(s => ({ name: s, present: false })),
+              applies: !p.optional,
+              optional: p.optional
+            }))
+          }
+        }
+      });
+    }
+
+    // Limpiar archivo temporal
+    fs.unlinkSync(req.file.path);
+
+    res.json({ success: true, message: `${data.length} registros procesados.` });
+  } catch (error) {
+    console.error('Error en importación:', error);
+    if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+    res.status(500).json({ error: 'Error al procesar el archivo de importación' });
+  }
 });
 
 // ---------- Exportar/Importar metadatos ----------
 app.get('/api/export', async (req, res) => {
   try {
     const students = await prisma.student.findMany({
-      include: { documents: true }
+      include: { 
+        documents: {
+          orderBy: { id: 'asc' }
+        } 
+      },
+      orderBy: { id: 'asc' }
     });
     res.json(students);
   } catch (error) {
